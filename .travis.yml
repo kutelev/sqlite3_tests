@@ -1,0 +1,33 @@
+language: cpp
+
+script:
+- git clone --branch release-1.8.1 --depth 1 https://github.com/google/googletest.git
+- git clone --branch master --depth 1 https://github.com/kutelev/overthrower.git
+- cd overthrower
+- cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_VERBOSE_MAKEFILE=1 .
+- cmake --build . --config Release
+- cd ..
+- curl https://www.sqlite.org/2018/sqlite-amalgamation-3260000.zip -o sqlite-amalgamation-3260000.zip
+- unzip sqlite-amalgamation-3260000.zip
+- rm sqlite-amalgamation-3260000.zip
+- mv sqlite-amalgamation-3260000 sqlite3
+- cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_VERBOSE_MAKEFILE=1 .
+- cmake --build . --config Release
+- if [[ "$PLATFORM" == "linux" ]]; then LD_LIBRARY_PATH=./overthrower LD_PRELOAD=liboverthrower.so ./sqlite3_tests; fi
+- if [[ "$PLATFORM" == "macos" ]]; then DYLD_FORCE_FLAT_NAMESPACE=1 DYLD_INSERT_LIBRARIES=./overthrower/overthrower.framework/Versions/Current/overthrower ./sqlite3_tests; fi
+
+matrix:
+  include:
+    - os: linux
+      dist: xenial
+      sudo: false
+      env: PLATFORM=linux
+    - os: osx
+      osx_image: xcode8.3
+      env: PLATFORM=macos
+    - os: osx
+      osx_image: xcode9.4
+      env: PLATFORM=macos
+    - os: osx
+      osx_image: xcode10.1
+      env: PLATFORM=macos

@@ -19,22 +19,59 @@ void pauseOverthrower(unsigned int duration) __attribute__((weak));
 void resumeOverthrower() __attribute__((weak));
 }
 
-#define OOM_SAFE_ASSERT_EQ(A, B)    \
-    {                               \
-        const auto a = A;           \
-        const auto b = B;           \
-        overthrower.pause(0, true); \
-        ASSERT_EQ(a, b);            \
-        overthrower.resume();       \
+class OverthrowerPauser final {
+public:
+    OverthrowerPauser()
+        : paused(true)
+    {
+        pauseOverthrower(0); // Pause for forever
     }
 
-#define OOM_SAFE_ASSERT_NE(A, B)    \
-    {                               \
-        const auto a = A;           \
-        const auto b = B;           \
-        overthrower.pause(0, true); \
-        ASSERT_NE(a, b);            \
-        overthrower.resume();       \
+    OverthrowerPauser(unsigned int duration)
+        : paused(duration)
+    {
+        if (duration) // If duration is zero no pause is required
+            pauseOverthrower(duration);
+    }
+
+    ~OverthrowerPauser()
+    {
+        if (paused)
+            resumeOverthrower();
+    }
+
+private:
+    const bool paused;
+};
+
+#define OOM_SAFE_ASSERT_EQ(A, B)  \
+    {                             \
+        const auto a = A;         \
+        const auto b = B;         \
+        OverthrowerPauser pauser; \
+        ASSERT_EQ(a, b);          \
+    }
+
+#define OOM_SAFE_ASSERT_NE(A, B)  \
+    {                             \
+        const auto a = A;         \
+        const auto b = B;         \
+        OverthrowerPauser pauser; \
+        ASSERT_NE(a, b);          \
+    }
+
+#define OOM_SAFE_ASSERT_TRUE(A)   \
+    {                             \
+        const auto a = A;         \
+        OverthrowerPauser pauser; \
+        ASSERT_TRUE(a);           \
+    }
+
+#define OOM_SAFE_ASSERT_FALSE(A)  \
+    {                             \
+        const auto a = A;         \
+        OverthrowerPauser pauser; \
+        ASSERT_FALSE(a);          \
     }
 
 GTEST_API_ int main(int argc, char** argv)
@@ -80,25 +117,23 @@ public:
         ASSERT_EQ(blocks_leaked, 0);
     }
 
-    void pause(unsigned int duration, bool treat_zero_as_forever = false)
+    void pause(unsigned int duration)
     {
-        pauseOverthrower(0);
-        ASSERT_FALSE(paused);
-        resumeOverthrower();
-        paused = true;
-        if (!duration && !treat_zero_as_forever)
-            return;
-        pauseOverthrower(duration);
+        {
+            OverthrowerPauser pauser;
+            paused.push_back(duration);
+        }
+        if (duration)
+            pauseOverthrower(duration);
     }
 
     void resume()
     {
-        const bool was_paused = paused;
-        paused = false;
-        resumeOverthrower();
-        pauseOverthrower(0);
-        ASSERT_TRUE(was_paused);
-        resumeOverthrower();
+        OOM_SAFE_ASSERT_FALSE(paused.empty());
+        const bool was_paused = paused.back();
+        paused.pop_back();
+        if (was_paused)
+            resumeOverthrower();
     }
 
 protected:
@@ -106,7 +141,7 @@ protected:
     void unsetEnv(const char* name) { ASSERT_EQ(unsetenv(name), 0); }
 
     bool activated = false;
-    bool paused = false;
+    std::vector<bool> paused;
 };
 
 class OverthrowerStrategyRandom : public DefaultOverthrower {
@@ -130,29 +165,14 @@ public:
     }
 };
 
-class OverthrowerPauser {
-public:
-    OverthrowerPauser() = delete;
-    OverthrowerPauser(DefaultOverthrower& overthrower, unsigned int duration, bool treat_zero_as_forever = false)
-        : overthrower(overthrower)
-    {
-        overthrower.pause(duration, treat_zero_as_forever);
-    }
-    ~OverthrowerPauser() { overthrower.resume(); }
-
-protected:
-    DefaultOverthrower& overthrower;
-};
-
 static void removeDbIfExists(DefaultOverthrower& overthrower)
 {
     static const bool db_in_memory = !strcmp(TEST_DB_FILE_NAME, ":memory:");
     if (db_in_memory)
         return;
-    overthrower.pause(0, true);
+    OverthrowerPauser pauser;
     if (!access(TEST_DB_FILE_NAME, F_OK))
         ASSERT_EQ(unlink(TEST_DB_FILE_NAME), 0);
-    overthrower.resume();
 }
 
 TEST(SQLite3, OpenClose)
@@ -200,19 +220,21 @@ TEST(SQLite3, OpenClose)
 
 TEST(SQLite3, Resistance)
 {
-    static constexpr int rows_to_insert = 100;
+    static constexpr int rows_to_insert = 1000;
 
-    OverthrowerStrategyRandom overthrower(2);
+    OverthrowerStrategyRandom overthrower(8);
 
     int status;
     sqlite3* handle = nullptr;
+    sqlite3_stmt* prepared_statement = nullptr;
 
     auto retryOpen = [&handle, &status, &overthrower]() {
         for (unsigned int i = 0; i == 0 || status != SQLITE_OK; ++i) {
             removeDbIfExists(overthrower);
-            overthrower.pause(i);
-            status = sqlite3_open(TEST_DB_FILE_NAME, &handle);
-            overthrower.resume();
+            {
+                OverthrowerPauser pauser(i);
+                status = sqlite3_open(TEST_DB_FILE_NAME, &handle);
+            }
             if (status != SQLITE_OK && handle) {
                 OOM_SAFE_ASSERT_NE(status, SQLITE_NOMEM);
                 OOM_SAFE_ASSERT_EQ(sqlite3_close(handle), SQLITE_OK);
@@ -224,7 +246,7 @@ TEST(SQLite3, Resistance)
 
     auto retryExecCommand = [&handle, &status, &overthrower](const char* sql) {
         for (unsigned int i = 0; i == 0 || status != SQLITE_OK; ++i) {
-            OverthrowerPauser pauser(overthrower, i);
+            OverthrowerPauser pauser(i);
             status = sqlite3_exec(handle, sql, nullptr, nullptr, nullptr);
         }
     };
@@ -234,11 +256,19 @@ TEST(SQLite3, Resistance)
             status = func();
         }
         for (unsigned int i = 0; !do_single_attempt && (i == 0 || status != expected_status); ++i) {
-            OverthrowerPauser pauser(overthrower, i);
+            OverthrowerPauser pauser(i);
             status = func();
         }
         return status == expected_status;
     };
+
+    auto prepare = [&handle, &prepared_statement]() {
+        return sqlite3_prepare_v2(handle, "INSERT INTO test_table(b, c) VALUES (?, ?)", -1, &prepared_statement, nullptr);
+    };
+    auto reset = [&prepared_statement]() { return sqlite3_reset(prepared_statement); };
+    auto bind_1st_arg = [&prepared_statement]() { return sqlite3_bind_int(prepared_statement, 1, 1); };
+    auto bind_2nd_arg = [&prepared_statement]() { return sqlite3_bind_text(prepared_statement, 2, "AAAAAAAAAAAAAAAA", -1, nullptr); };
+    auto step = [&prepared_statement]() { return sqlite3_step(prepared_statement); };
 
     overthrower.activate();
 
@@ -252,17 +282,7 @@ TEST(SQLite3, Resistance)
     }
 
     for (bool single_transaction : { false, true }) {
-        sqlite3_stmt* prepared_statement = nullptr;
-
-        overthrower.pause(0, true);
-        auto prepare = [&handle, &prepared_statement]() {
-            return sqlite3_prepare_v2(handle, "INSERT INTO test_table(b, c) VALUES (?, ?)", -1, &prepared_statement, nullptr);
-        };
-        auto reset = [&prepared_statement]() { return sqlite3_reset(prepared_statement); };
-        auto bind_1st_arg = [&prepared_statement]() { return sqlite3_bind_int(prepared_statement, 1, 1); };
-        auto bind_2nd_arg = [&prepared_statement]() { return sqlite3_bind_text(prepared_statement, 2, "AAAAAAAAAAAAAAAA", -1, nullptr); };
-        auto step = [&prepared_statement]() { return sqlite3_step(prepared_statement); };
-        overthrower.resume();
+        prepared_statement = nullptr;
 
         retryCommand(prepare);
 

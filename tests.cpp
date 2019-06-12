@@ -262,13 +262,20 @@ TEST(SQLite3, Resistance)
         return status == expected_status;
     };
 
-    auto prepare = [&handle, &prepared_statement]() {
+    auto prepare_insert = [&handle, &prepared_statement]() {
         return sqlite3_prepare_v2(handle, "INSERT INTO test_table(b, c) VALUES (?, ?)", -1, &prepared_statement, nullptr);
     };
+
     auto reset = [&prepared_statement]() { return sqlite3_reset(prepared_statement); };
-    auto bind_1st_arg = [&prepared_statement]() { return sqlite3_bind_int(prepared_statement, 1, 1); };
-    auto bind_2nd_arg = [&prepared_statement]() { return sqlite3_bind_text(prepared_statement, 2, "AAAAAAAAAAAAAAAA", -1, nullptr); };
+    auto bind_1st_column = [&prepared_statement]() { return sqlite3_bind_int(prepared_statement, 1, 1); };
+    auto bind_2nd_column = [&prepared_statement]() { return sqlite3_bind_text(prepared_statement, 2, "AAAAAAAAAAAAAAAA", -1, nullptr); };
     auto step = [&prepared_statement]() { return sqlite3_step(prepared_statement); };
+
+    auto prepare_select = [&handle, &prepared_statement]() {
+        return sqlite3_prepare_v2(handle, "SELECT a, b, c FROM test_table", -1, &prepared_statement, nullptr);
+    };
+    auto get_1st_column = [&prepared_statement]() { return sqlite3_column_int(prepared_statement, 1); };
+    auto get_2nd_column = [&prepared_statement]() { return sqlite3_column_text(prepared_statement, 2) == nullptr ? 0 : 1; };
 
     overthrower.activate();
 
@@ -284,7 +291,7 @@ TEST(SQLite3, Resistance)
     for (bool single_transaction : { false, true }) {
         prepared_statement = nullptr;
 
-        retryCommand(prepare);
+        retryCommand(prepare_insert);
 
         OOM_SAFE_ASSERT_NE(prepared_statement, nullptr);
 
@@ -296,8 +303,8 @@ TEST(SQLite3, Resistance)
             }
 
             for (int j = 0; j < rows_to_insert; ++j) {
-                if (!retryCommand(reset, single_transaction) || !retryCommand(bind_1st_arg, single_transaction) ||
-                    !retryCommand(bind_2nd_arg, single_transaction) || !retryCommand(step, single_transaction, SQLITE_DONE))
+                if (!retryCommand(reset, single_transaction) || !retryCommand(bind_1st_column, single_transaction) ||
+                    !retryCommand(bind_2nd_column, single_transaction) || !retryCommand(step, single_transaction, SQLITE_DONE))
                     break;
             }
 
@@ -313,6 +320,15 @@ TEST(SQLite3, Resistance)
         if (single_transaction)
             retryExecCommand("END TRANSACTION");
     }
+
+    retryCommand(prepare_select);
+    for (int i = 0; i < rows_to_insert * 2; ++i) {
+        OOM_SAFE_ASSERT_TRUE(retryCommand(step, false, SQLITE_ROW));
+        OOM_SAFE_ASSERT_TRUE(retryCommand(get_1st_column, false, 1));
+        OOM_SAFE_ASSERT_TRUE(retryCommand(get_2nd_column, false, 1));
+    }
+    OOM_SAFE_ASSERT_TRUE(retryCommand(step, false, SQLITE_DONE));
+    retryCommand([&prepared_statement]() { return sqlite3_finalize(prepared_statement); });
 
     retryExecCommand("DROP INDEX test_idx");
     retryExecCommand("DROP TABLE test_table");
